@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   release:
-    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@8d188d5b53bf4fbfb3983696d764c3e4b6e339dc
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@625b0cecb72fc9d52103a60cc9a470b8d6e52fae
     with:
       app_slug: smart-cleaner
       version: ${{ inputs.version }}
