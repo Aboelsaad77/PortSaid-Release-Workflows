@@ -48,6 +48,15 @@ on:
         description: Produce a detached Ed25519 signature + manifest.
         required: false
         default: true
+      artifact_name:
+        description: >-
+          Name of an artifact already uploaded in this same workflow run
+          (same-run handoff). When set, the build job downloads it instead of
+          compiling, so a Windows product build can hand its installer to this
+          Linux publish workflow without widening any token's scope.
+        required: false
+        default: ""
+        type: string
         type: boolean
     secrets:
       DIST_REPO_TOKEN:
@@ -70,7 +79,15 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Download handed-off artifact (same run)
+        if: ${{ inputs.artifact_name != '' }}
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: incoming
+
       - name: Build
+        if: ${{ inputs.artifact_name == '' }}
         run: |
           set -euo pipefail
           if [ -f package.json ] && command -v npm >/dev/null; then
@@ -82,8 +99,13 @@ jobs:
         id: pick
         run: |
           set -euo pipefail
+          if [ -n "${{ inputs.artifact_name }}" ]; then
+            glob="incoming/*"
+          else
+            glob="${{ inputs.artifact_glob }}"
+          fi
           # shellcheck disable=SC2086
-          files=$(ls -1 ${{ inputs.artifact_glob }} 2>/dev/null || true)
+          files=$(ls -1 $glob 2>/dev/null || true)
           count=$(printf '%s' "$files" | grep -c . || true)
           if [ "$count" -ne 1 ]; then
             echo "::error::expected exactly one installer, found $count"
