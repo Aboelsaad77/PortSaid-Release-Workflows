@@ -44,10 +44,6 @@ on:
         required: false
         default: false
         type: boolean
-      sign:
-        description: Produce a detached Ed25519 signature + manifest.
-        required: false
-        default: true
       artifact_name:
         description: >-
           Name of an artifact already uploaded in this same workflow run
@@ -57,6 +53,10 @@ on:
         required: false
         default: ""
         type: string
+      sign:
+        description: Produce a detached Ed25519 signature + manifest.
+        required: false
+        default: true
         type: boolean
     secrets:
       DIST_REPO_TOKEN:
