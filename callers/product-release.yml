@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   release:
-    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@8aaa63120cf4f164d89b3997aeaf08bd10c6df6f
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@decfe899e0fb0e99dbac2c983d256390a8ecc9aa
     with:
       app_slug: media-downloader
       version: ${{ inputs.version }}
