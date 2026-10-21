@@ -305,16 +305,28 @@ jobs:
   feed:
     name: publish app feed manifest
     needs: [build, publish]
-    if: ${{ inputs.feed_mode != '' }}
+    # Deliberately ungated: an empty feed_mode is a documented no-op (first step),
+    # not a reason to skip the job. A job-level `if` here silently skipped feed
+    # publication on the first real release, which is exactly the kind of failure
+    # that must be impossible.
+
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
+      - name: No feed requested
+        if: ${{ inputs.feed_mode == '' }}
+        run: |
+          echo "feed_mode is empty — this app publishes release assets only."
+          echo "Skipping manifest publication by design."
+
       - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        if: ${{ inputs.feed_mode != '' }}
         with:
           path: staging
 
       - name: Build manifest from published bytes
+        if: ${{ inputs.feed_mode != '' }}
         id: manifest
         env:
           MODE: ${{ inputs.feed_mode }}
@@ -446,6 +458,7 @@ jobs:
           PY
 
       - name: Commit feed atomically (with history)
+        if: ${{ inputs.feed_mode != '' }}
         env:
           GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
           DIST_REPO: ${{ inputs.dist_repo }}
@@ -492,6 +505,7 @@ jobs:
           PY
 
       - name: Verify what a client will actually download
+        if: ${{ inputs.feed_mode != '' }}
         env:
           DIST_REPO: ${{ inputs.dist_repo }}
           BRANCH: ${{ inputs.feed_branch }}
