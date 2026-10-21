@@ -44,6 +44,14 @@ on:
         required: false
         default: false
         type: boolean
+      primary_glob:
+        description: >-
+          Glob (matched against the artifact's internal paths, e.g.
+          "*/installer/*.exe") identifying the one asset the Store links to.
+          Everything else in the artifact is still published as a release asset.
+        required: false
+        default: ""
+        type: string
       feed_mode:
         description: >-
           How to publish this app's update manifest. "electron-updater" generates
@@ -123,13 +131,17 @@ jobs:
         id: pick
         run: |
           set -euo pipefail
+          primary="${{ inputs.primary_glob }}"
           if [ -n "${{ inputs.artifact_name }}" ]; then
-            glob="incoming/*"
+            if [ -n "$primary" ]; then
+              files=$(find incoming -type f -path "$primary" | sort || true)
+            else
+              files=$(find incoming -type f | sort || true)
+            fi
           else
-            glob="${{ inputs.artifact_glob }}"
+            # shellcheck disable=SC2086
+            files=$(ls -1 ${{ inputs.artifact_glob }} 2>/dev/null || true)
           fi
-          # shellcheck disable=SC2086
-          files=$(ls -1 $glob 2>/dev/null || true)
           count=$(printf '%s' "$files" | grep -c . || true)
           if [ "$count" -ne 1 ]; then
             echo "::error::expected exactly one installer, found $count"
@@ -218,7 +230,17 @@ jobs:
       - name: Verify artifact digest before publishing
         run: |
           set -euo pipefail
-          f=$(find staging/installer -maxdepth 1 -type f | head -1)
+          primary="${{ inputs.primary_glob }}"
+          if [ -n "$primary" ]; then
+            f=$(find staging -type f -path "$primary" | sort | head -1)
+          else
+            f=$(find staging -type f | sort | head -1)
+          fi
+          if [ -z "${f:-}" ]; then
+            echo "::error::primary asset not found in artifacts"
+            exit 1
+          fi
+          echo "primary asset: $f"
           got=$(sha256sum "$f" | cut -d' ' -f1)
           if [ "$got" != "${{ needs.build.outputs.digest }}" ]; then
             echo "::error::digest changed between build and publish"
