@@ -211,12 +211,23 @@ jobs:
           set -euo pipefail
           args=()
           [ "$PRE" = "true" ] && args+=(--prerelease)
+          # Upload each distinct asset name exactly once. A wildcard can list the
+          # same file twice (nested artifact paths), and GitHub rejects the second
+          # upload with "ReleaseAsset.name already exists", failing the release
+          # and rolling it back.
+          mapfile -t files < <(find staging -type f -printf '%f\t%p\n' | sort -t$'\t' -k1,1 -u | cut -f2-)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no files to publish"
+            exit 1
+          fi
+          printf 'publishing %d asset(s):\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
           gh release create "$VERSION" \
             --repo "$DIST_REPO" \
             --title "${{ inputs.app_slug }} $VERSION" \
             --notes "Automated release for ${{ inputs.app_slug }} $VERSION" \
             "${args[@]}" \
-            $(find staging -maxdepth 2 -type f)
+            "${files[@]}"
 
       - name: Post-publish check (digest visible to clients)
         env:
