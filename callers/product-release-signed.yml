@@ -1,0 +1,29 @@
+# Caller for an app whose clients verify a signed manifest (Smart Cleaner).
+#
+# Same rules as product-release.yml: SHA-pinned, manual dispatch only, no
+# secrets available to pull requests. The signing key lives in the
+# `release-signing` environment, which must require reviewer approval.
+name: release-signed
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@a3ea3d70bb0dc9e26c39639da31d6d4770da8a97
+    with:
+      app_slug: smart-cleaner
+      version: ${{ inputs.version }}
+      artifact_glob: "dist/*.exe"
+      dist_repo: Aboelsaad77/PortSaid-Releases
+      prerelease: false
+      sign: true
+    secrets:
+      DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+      SIGNING_KEY: ${{ secrets.SMART_CLEANER_SIGNING_KEY }}
