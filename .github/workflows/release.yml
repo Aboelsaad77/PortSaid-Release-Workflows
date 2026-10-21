@@ -1,0 +1,216 @@
+# Reusable release workflow — install into the central CI repository.
+#
+#   repo: <owner>/<central-ci-repo>   file: .github/workflows/release.yml
+#
+# Called by a thin, SHA-pinned caller in each product repository
+# (see callers/product-release.yml). Nothing here is specific to one app:
+# the caller passes the app slug, the artifact glob and the target repo.
+#
+# Security rules enforced by this file
+# ------------------------------------
+# * No secret is available to pull requests: the workflow is only reachable via
+#   workflow_call from a caller pinned to a commit on a protected branch.
+# * Third-party actions are pinned to full commit SHAs, never tags.
+# * Permissions are least-privilege: `contents: read` at the top, `write` only
+#   in the publish job, which runs after the artifact is built and hashed.
+# * The signing key is read from an environment secret and is never echoed,
+#   never written to a file inside the workspace, never uploaded as an artifact.
+#   Signing happens in a step whose only output is the detached signature.
+# * The publish job re-hashes the downloaded release asset and refuses to
+#   continue if it differs from the built digest (no silent corruption).
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      app_slug:
+        description: Application slug as registered in the store (e.g. media-downloader).
+        required: true
+        type: string
+      version:
+        description: Release version/tag to publish (e.g. v2.4.1).
+        required: true
+        type: string
+      artifact_glob:
+        description: Glob for the installer(s) to publish, relative to the workspace.
+        required: true
+        type: string
+      dist_repo:
+        description: Public distribution repository, owner/repo.
+        required: true
+        type: string
+      prerelease:
+        description: Publish as a GitHub prerelease (beta channel).
+        required: false
+        default: false
+        type: boolean
+      sign:
+        description: Produce a detached Ed25519 signature + manifest.
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      DIST_REPO_TOKEN:
+        description: Fine-grained token with contents:write on dist_repo only.
+        required: true
+      SIGNING_KEY:
+        description: Ed25519 private key (PEM) used to sign the manifest. Never printed.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build + digest
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.hash.outputs.digest }}
+      artifact: ${{ steps.pick.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          if [ -f package.json ] && command -v npm >/dev/null; then
+            npm ci --no-audit --no-fund
+            npm run build --if-present
+          fi
+
+      - name: Select installer
+        id: pick
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          files=$(ls -1 ${{ inputs.artifact_glob }} 2>/dev/null || true)
+          count=$(printf '%s' "$files" | grep -c . || true)
+          if [ "$count" -ne 1 ]; then
+            echo "::error::expected exactly one installer, found $count"
+            exit 1
+          fi
+          echo "artifact=$files" >> "$GITHUB_OUTPUT"
+
+      - name: Hash
+        id: hash
+        run: |
+          set -euo pipefail
+          digest=$(sha256sum "${{ steps.pick.outputs.artifact }}" | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "sha256: $digest"
+
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: installer
+          path: ${{ steps.pick.outputs.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    name: sign manifest
+    needs: build
+    if: ${{ inputs.sign }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: installer
+
+      - name: Sign
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          APP_SLUG: ${{ inputs.app_slug }}
+          VERSION: ${{ inputs.version }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          ARTIFACT: ${{ needs.build.outputs.artifact }}
+        run: |
+          set -euo pipefail
+          # Key arrives on stdin via a file the step deletes before exit; it is
+          # never echoed and never uploaded.
+          umask 077
+          keyfile=$(mktemp)
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s' "$SIGNING_KEY" > "$keyfile"
+          python3 - "$keyfile" "$APP_SLUG" "$VERSION" "$DIGEST" "$ARTIFACT" <<'PY'
+          import base64, json, sys
+          from pathlib import Path
+          from cryptography.hazmat.primitives import serialization
+          key_path, app, version, digest, artifact = sys.argv[1:6]
+          key = serialization.load_pem_private_key(Path(key_path).read_bytes(), password=None)
+          payload = {"app": app, "version": version, "sha256": digest,
+                     "asset": Path(artifact).name, "channel": "beta" if version.endswith("-beta") else "stable"}
+          canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+          doc = {"payload": payload, "signature": base64.b64encode(key.sign(canonical)).decode()}
+          Path("latest.json").write_text(json.dumps(doc, indent=2))
+          # The public key is printed so it can be stored in the registry.
+          print("public key (safe to publish):")
+          print(key.public_key().public_bytes(
+              encoding=serialization.Encoding.PEM,
+              format=serialization.PublicFormat.SubjectPublicKeyInfo).decode())
+          PY
+
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: manifest
+          path: latest.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish to dist repo
+    needs: [build, sign]
+    # `always()` would publish unsigned builds when signing fails; require both.
+    if: ${{ always() && needs.build.result == 'success' && (needs.sign.result == 'success' || needs.sign.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: staging
+
+      - name: Verify artifact digest before publishing
+        run: |
+          set -euo pipefail
+          f=$(find staging/installer -maxdepth 1 -type f | head -1)
+          got=$(sha256sum "$f" | cut -d' ' -f1)
+          if [ "$got" != "${{ needs.build.outputs.digest }}" ]; then
+            echo "::error::digest changed between build and publish"
+            exit 1
+          fi
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+          DIST_REPO: ${{ inputs.dist_repo }}
+          VERSION: ${{ inputs.version }}
+          PRE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=()
+          [ "$PRE" = "true" ] && args+=(--prerelease)
+          gh release create "$VERSION" \
+            --repo "$DIST_REPO" \
+            --title "${{ inputs.app_slug }} $VERSION" \
+            --notes "Automated release for ${{ inputs.app_slug }} $VERSION" \
+            "${args[@]}" \
+            $(find staging -maxdepth 2 -type f)
+
+      - name: Post-publish check (digest visible to clients)
+        env:
+          GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+          DIST_REPO: ${{ inputs.dist_repo }}
+          VERSION: ${{ inputs.version }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$DIST_REPO/releases/tags/$VERSION" > release.json
+          python3 - <<'PY'
+          import json, os, sys
+          data = json.load(open("release.json"))
+          want = os.environ["DIGEST"]
+          digests = {a.get("digest") for a in data.get("assets", [])}
+          if not any(d and d.endswith(want) for d in digests):
+              sys.exit("published asset does not expose the expected sha256 digest")
+          print("digest confirmed on the published release")
+          PY
