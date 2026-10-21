@@ -1,0 +1,33 @@
+# Thin caller — copy to <product-repo>/.github/workflows/release.yml
+#
+# Every caller pins the central workflow to an immutable commit SHA. A tag or
+# branch ref would let an upstream change alter what runs with this repository's
+# secrets, so `@v1` is deliberately not used.
+#
+# Replace Aboelsaad77/PortSaid-Release-Workflows and the 40-character SHA, then set the two
+# repository secrets. Do not add other triggers: `workflow_dispatch` on a
+# protected branch is the only way a release starts.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version/tag to publish (e.g. v2.4.1)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@a3ea3d70bb0dc9e26c39639da31d6d4770da8a97
+    with:
+      app_slug: media-downloader
+      version: ${{ inputs.version }}
+      artifact_glob: "dist/*.exe"
+      dist_repo: Aboelsaad77/PortSaid-Releases
+      prerelease: false
+      sign: false
+    secrets:
+      DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
