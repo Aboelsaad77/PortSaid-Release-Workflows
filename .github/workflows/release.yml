@@ -44,6 +44,30 @@ on:
         required: false
         default: false
         type: boolean
+      feed_mode:
+        description: >-
+          How to publish this app's update manifest. "electron-updater" generates
+          a latest.yml from the published bytes (sha512 + sha256 + size are
+          computed here, never trusted from the input). "signed-json" copies an
+          already-signed manifest verbatim and verifies that the sha256 inside it
+          matches the published binary. "" disables feed publication.
+        required: false
+        default: ""
+        type: string
+      feed_manifest:
+        description: >-
+          Path (within the downloaded artifacts) of the source manifest. For
+          electron-updater mode this is the builder's latest.yml; for signed-json
+          mode it is the signed latest.json produced by the product's own signer.
+        required: false
+        default: ""
+        type: string
+      feed_branch:
+        description: Branch of the distribution repository that carries the feeds tree.
+        required: false
+        default: main
+        type: string
+
       artifact_name:
         description: >-
           Name of an artifact already uploaded in this same workflow run
@@ -247,3 +271,230 @@ jobs:
               sys.exit("published asset does not expose the expected sha256 digest")
           print("digest confirmed on the published release")
           PY
+
+  # ── app-specific, domain-independent update feed ──────────────────────────
+  # Publishes feeds/<app>/<channel>/latest.<ext> in the distribution repository.
+  # Clients fetch this from raw.githubusercontent.com, so update discovery and
+  # downloads never touch the Store domain.
+  #
+  # Isolation: the path is built from the app slug and the channel, so
+  # publishing app B can never overwrite app A's feed, and a prerelease writes
+  # to the beta channel, never over stable.
+  feed:
+    name: publish app feed manifest
+    needs: [build, publish]
+    if: ${{ inputs.feed_mode != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: staging
+
+      - name: Build manifest from published bytes
+        id: manifest
+        env:
+          MODE: ${{ inputs.feed_mode }}
+          MANIFEST_SRC: ${{ inputs.feed_manifest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, sys
+
+          mode = os.environ["MODE"].strip()
+          src = os.environ["MANIFEST_SRC"].strip()
+          app = "${{ inputs.app_slug }}"
+          version = "${{ inputs.version }}"
+          dist = "${{ inputs.dist_repo }}"
+          pre = "${{ inputs.prerelease }}" == "true"
+          channel = "beta" if pre else "stable"
+
+          base = f"https://github.com/{dist}/releases/download/{version}"
+          staged = list(pathlib.Path("staging").rglob("*"))
+          manifest_path = next((p for p in staged if p.is_file() and str(p).endswith(src)), None)
+          if manifest_path is None:
+              sys.exit(f"manifest not found in artifacts: {src}")
+
+          def digest(p, algo):
+              h = hashlib.new(algo)
+              with open(p, "rb") as fh:
+                  for chunk in iter(lambda: fh.read(1 << 20), b""):
+                      h.update(chunk)
+              return h
+
+          def find(name):
+              hits = [p for p in staged if p.is_file() and p.name == name]
+              if not hits:
+                  sys.exit(f"referenced asset missing from artifacts: {name}")
+              return hits[0]
+
+          if mode == "electron-updater":
+              text = manifest_path.read_text()
+              # minimal targeted parse: the block `files:` → `- url:` and the
+              # scalar keys electron-updater actually consumes.
+              import re
+              mv = re.search(r"^version:\s*(\S+)\s*$", text, re.M)
+              if not mv:
+                  sys.exit("latest.yml has no version")
+              declared = mv.group(1)
+              urls = re.findall(r"^\s*-\s*url:\s*(\S+)\s*$", text, re.M)
+              paths = re.findall(r"^path:\s*(\S+)\s*$", text, re.M)
+              if not urls:
+                  sys.exit("latest.yml has no files[].url")
+              asset_name = urls[0].split("/")[-1]
+              target = find(asset_name)
+              sha512 = hashlib.sha512(target.read_bytes()).hexdigest()
+              sha512_b64 = __import__("base64").b64encode(bytes.fromhex(sha512)).decode()
+              sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
+              size = target.stat().st_size
+              if str(size) not in text:
+                  sys.exit(f"manifest size does not describe the published bytes ({size})")
+              manifest = (
+                  f"app: {app}\n"
+                  f"channel: {channel}\n"
+                  f"version: {version.lstrip('v')}\n"
+                  f"files:\n"
+                  f"  - url: {base}/{asset_name}\n"
+                  f"    sha512: {sha512_b64}\n"
+                  f"    sha256: {sha256}\n"
+                  f"    size: {size}\n"
+                  f"path: {asset_name}\n"
+                  f"sha512: {sha512_b64}\n"
+                  f"sha256: {sha256}\n"
+                  f"size: {size}\n"
+              )
+              prev = re.search(r"^releaseDate:.*$", text, re.M)
+              if prev:
+                  manifest += prev.group(0) + "\n"
+              ext = "yml"
+          elif mode == "signed-json":
+              manifest = manifest_path.read_text()
+              doc = json.loads(manifest)
+              if doc.get("version") != version.lstrip("v"):
+                  sys.exit(f"signed manifest version {doc.get('version')} != {version}")
+              for f in doc.get("files", []):
+                  target = find(str(f.get("url", "")).split("/")[-1])
+                  if f.get("size") and int(f["size"]) != target.stat().st_size:
+                      sys.exit("signed manifest size does not match the published asset")
+                  if f.get("sha256") and f["sha256"].lower() != hashlib.sha256(target.read_bytes()).hexdigest():
+                      sys.exit("signed manifest sha256 does not match the published asset")
+              if "signature" not in doc:
+                  sys.exit("signed-json mode requires a signed manifest")
+              ext = "json"
+          else:
+              sys.exit(f"unknown feed_mode: {mode}")
+
+          pathlib.Path("feed.out").write_text(manifest)
+          pathlib.Path("feed.meta").write_text(json.dumps(
+              {"app": app, "channel": channel, "version": version, "ext": ext}))
+
+          # Some clients (the MD bootstrapper) also read a portable manifest to
+          # offer the no-install flavour. Publish it beside latest.yml, rewritten
+          # the same way, but only when the build actually produced one.
+          extra = None
+          if mode == "electron-updater":
+              src_portable = next((p for p in staged if p.is_file() and p.name == "portable.yml"), None)
+              if src_portable is not None:
+                  text = src_portable.read_text()
+                  import re
+                  urls = re.findall(r"^\s*-\s*url:\s*(\S+)\s*$", text, re.M)
+                  if urls:
+                      name = urls[0].split("/")[-1]
+                      tgt = find(name)
+                      b = tgt.read_bytes()
+                      s512 = __import__("base64").b64encode(hashlib.sha512(b).digest()).decode()
+                      extra = (
+                          f"app: {app}\n"
+                          f"channel: {channel}\n"
+                          f"version: {version.lstrip('v')}\n"
+                          f"files:\n"
+                          f"  - url: {base}/{name}\n"
+                          f"    sha512: {s512}\n"
+                          f"    sha256: {hashlib.sha256(b).hexdigest()}\n"
+                          f"    size: {len(b)}\n"
+                          f"path: {name}\n"
+                          f"sha512: {s512}\n"
+                          f"sha256: {hashlib.sha256(b).hexdigest()}\n"
+                          f"size: {len(b)}\n"
+                      )
+                      pathlib.Path("feed.extra").write_text(extra)
+                      print(f"portable manifest ready: {name}")
+          print(f"manifest ready: app={app} channel={channel} version={version} ext={ext}")
+          PY
+
+      - name: Commit feed atomically (with history)
+        env:
+          GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+          DIST_REPO: ${{ inputs.dist_repo }}
+          BRANCH: ${{ inputs.feed_branch }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, pathlib, requests
+          tok = os.environ["GH_TOKEN"]; repo = os.environ["DIST_REPO"]; branch = os.environ["BRANCH"]
+          meta = json.loads(pathlib.Path("feed.meta").read_text())
+          body = pathlib.Path("feed.out").read_bytes()
+          app, channel, version, ext = meta["app"], meta["channel"], meta["version"], meta["ext"]
+          api = f"https://api.github.com/repos/{repo}/contents"
+          hdr = {"Authorization": f"token {tok}", "Accept": "application/vnd.github+json"}
+
+          def put(path, data, message):
+              cur = requests.get(f"{api}/{path}", params={"ref": branch}, headers=hdr, timeout=30)
+              payload = {"message": message, "branch": branch,
+                         "content": base64.b64encode(data).decode()}
+              if cur.status_code == 200:
+                  payload["sha"] = cur.json()["sha"]
+              elif cur.status_code != 404:
+                  raise SystemExit(f"cannot read {path}: {cur.status_code}")
+              r = requests.put(f"{api}/{path}", json=payload, headers=hdr, timeout=60)
+              if r.status_code not in (200, 201):
+                  raise SystemExit(f"commit failed for {path}: {r.status_code} {r.text[:200]}")
+              return r.json()["commit"]["sha"]
+
+          hist = f"feeds/{app}/{channel}/history/{version}.{ext}"
+          live = f"feeds/{app}/{channel}/latest.{ext}"
+          c1 = put(hist, body, f"feed({app}/{channel}): archive {version}")
+          c2 = put(live, body, f"feed({app}/{channel}): publish {version}")
+          print(f"history commit {c1[:8]} → live commit {c2[:8]}")
+          paths = [live, hist]
+          if pathlib.Path("feed.extra").exists():
+              extra = pathlib.Path("feed.extra").read_bytes()
+              put(f"feeds/{app}/{channel}/history/portable-{version}.yml", extra,
+                  f"feed({app}/{channel}): archive portable {version}")
+              c3 = put(f"feeds/{app}/{channel}/portable.yml", extra,
+                       f"feed({app}/{channel}): publish portable {version}")
+              print(f"portable commit {c3[:8]}")
+              paths.append(f"feeds/{app}/{channel}/portable.yml")
+          pathlib.Path("feed.paths").write_text("\n".join(paths) + "\n")
+          PY
+
+      - name: Verify what a client will actually download
+        env:
+          DIST_REPO: ${{ inputs.dist_repo }}
+          BRANCH: ${{ inputs.feed_branch }}
+        run: |
+          set -euo pipefail
+          mapfile -t paths < feed.paths
+          for i in $(seq 1 12); do
+            ok=1
+            for live in "${paths[@]}"; do
+              raw="https://raw.githubusercontent.com/${DIST_REPO}/${BRANCH}/${live}"
+              if ! curl -fsS --max-time 20 "$raw" -o fetched || ! cmp -s fetched feed.out; then
+                # portable.yml has its own body; compare it to feed.extra
+                if [[ "$live" == *portable.yml ]] && [[ -f feed.extra ]] && cmp -s fetched feed.extra; then
+                  :
+                else
+                  ok=0
+                fi
+              fi
+            done
+            if [ "$ok" = "1" ]; then
+              echo "feed live and byte-identical: ${paths[*]}"
+              exit 0
+            fi
+            echo "not propagated yet (attempt $i)"
+            sleep 5
+          done
+          echo "::error::published feed does not match what clients will fetch"
+          exit 1
