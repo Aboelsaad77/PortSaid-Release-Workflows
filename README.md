@@ -23,7 +23,7 @@ that ref could change what runs with your repository's secrets.
 ```yaml
 jobs:
   release:
-    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@a3ea3d70bb0dc9e26c39639da31d6d4770da8a97
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@8aaa63120cf4f164d89b3997aeaf08bd10c6df6f
     with:
       app_slug: media-downloader
       version: ${{ inputs.version }}
@@ -52,7 +52,43 @@ via `workflow_call`, and callers use `workflow_dispatch` on a protected branch.
 
 ## Status
 
-Workflow installed and SHA-pinned; the caller templates reference commit `a3ea3d70bb0dc9e26c39639da31d6d4770da8a97`.
+Workflow installed and SHA-pinned; the caller templates reference commit `8aaa63120cf4f164d89b3997aeaf08bd10c6df6f`.
 The workflow has **not** been executed end to end yet — that needs a product
 artifact and a `DIST_REPO_TOKEN`. Distribution was exercised independently by
 publishing a test release and verifying public discovery through the store.
+
+## Same-run artifact handoff (preferred for Windows products)
+
+A Windows product cannot build its installer on this runner. Instead the product
+workflow uploads the installer and calls this one **in the same run**:
+
+```yaml
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      # ... build + sign the installer ...
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: registry-installer
+          path: release/installer/SomeApp-Setup.exe
+
+  registry-publish:
+    needs: build
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@8aaa63120cf4f164d89b3997aeaf08bd10c6df6f
+    with:
+      app_slug: media-downloader
+      version: ${{ inputs.version }}
+      artifact_glob: "release/installer/*.exe"   # unused when artifact_name is set
+      artifact_name: registry-installer
+      dist_repo: Aboelsaad77/PortSaid-Releases
+      prerelease: true
+      sign: false
+    secrets:
+      DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+```
+
+Why same-run: artifacts are scoped to a workflow run, so the publish job can
+download one produced moments earlier. `DIST_REPO_TOKEN` therefore keeps
+`contents: write` on the distribution repository only — it never needs read
+access to the private product repository.
