@@ -23,7 +23,7 @@ that ref could change what runs with your repository's secrets.
 ```yaml
 jobs:
   release:
-    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@625b0cecb72fc9d52103a60cc9a470b8d6e52fae
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@0cbc5f324169aa40c8e5d5edb438b62d3cdb1071
     with:
       app_slug: media-downloader
       version: ${{ inputs.version }}
@@ -52,7 +52,7 @@ via `workflow_call`, and callers use `workflow_dispatch` on a protected branch.
 
 ## Status
 
-Workflow installed and SHA-pinned; the caller templates reference commit `625b0cecb72fc9d52103a60cc9a470b8d6e52fae`.
+Workflow installed and SHA-pinned; the caller templates reference commit `0cbc5f324169aa40c8e5d5edb438b62d3cdb1071`.
 The workflow has **not** been executed end to end yet — that needs a product
 artifact and a `DIST_REPO_TOKEN`. Distribution was exercised independently by
 publishing a test release and verifying public discovery through the store.
@@ -75,7 +75,7 @@ jobs:
 
   registry-publish:
     needs: build
-    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@625b0cecb72fc9d52103a60cc9a470b8d6e52fae
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@0cbc5f324169aa40c8e5d5edb438b62d3cdb1071
     with:
       app_slug: media-downloader
       version: ${{ inputs.version }}
