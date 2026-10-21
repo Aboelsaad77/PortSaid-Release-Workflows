@@ -1,0 +1,23 @@
+# Mechanics self-test for the reusable release workflow.
+# Proves the plumbing (digest -> publish -> post-publish verification) executes.
+# The artifact is a one-line text file labelled as a mechanics probe: it is NOT
+# a product build and must never be presented as one.
+name: pipeline-selftest
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@a3ea3d70bb0dc9e26c39639da31d6d4770da8a97
+    with:
+      app_slug: media-downloader
+      version: v0.0.2-pipeline-mechanics
+      artifact_glob: "mechanics/*.zip"
+      dist_repo: Aboelsaad77/PortSaid-Releases
+      prerelease: true
+      sign: false
+    secrets:
+      DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
