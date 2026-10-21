@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   release:
-    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@a3ea3d70bb0dc9e26c39639da31d6d4770da8a97
+    uses: Aboelsaad77/PortSaid-Release-Workflows/.github/workflows/release.yml@8aaa63120cf4f164d89b3997aeaf08bd10c6df6f
     with:
       app_slug: media-downloader
       version: v0.0.2-pipeline-mechanics
