@@ -504,33 +504,61 @@ jobs:
           pathlib.Path("feed.paths").write_text("\n".join(paths) + "\n")
           PY
 
-      - name: Verify what a client will actually download
+      - name: Verify the committed feed (authoritative), then the CDN (best effort)
         if: ${{ inputs.feed_mode != '' }}
         env:
+          GH_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
           DIST_REPO: ${{ inputs.dist_repo }}
           BRANCH: ${{ inputs.feed_branch }}
         run: |
           set -euo pipefail
-          mapfile -t paths < feed.paths
-          for i in $(seq 1 12); do
-            ok=1
-            for live in "${paths[@]}"; do
-              raw="https://raw.githubusercontent.com/${DIST_REPO}/${BRANCH}/${live}"
-              if ! curl -fsS --max-time 20 "$raw" -o fetched || ! cmp -s fetched feed.out; then
-                # portable.yml has its own body; compare it to feed.extra
-                if [[ "$live" == *portable.yml ]] && [[ -f feed.extra ]] && cmp -s fetched feed.extra; then
-                  :
-                else
-                  ok=0
-                fi
-              fi
-            done
-            if [ "$ok" = "1" ]; then
-              echo "feed live and byte-identical: ${paths[*]}"
-              exit 0
-            fi
-            echo "not propagated yet (attempt $i)"
-            sleep 5
-          done
-          echo "::error::published feed does not match what clients will fetch"
-          exit 1
+          # The repository content is the source of truth. raw.githubusercontent is
+          # a CDN with a multi-minute cache, so it must never be the gate: an
+          # earlier revision failed healthy releases because the CDN still served
+          # the previous manifest. Compare against the API first, then report what
+          # the CDN serves without failing on propagation delay.
+          python3 - <<'PYV'
+          import base64, hashlib, json, os, pathlib, sys, time
+          import urllib.request
+
+          repo, branch = os.environ["DIST_REPO"], os.environ["BRANCH"]
+          tok = os.environ["GH_TOKEN"]
+          live_bodies = {"feeds/": pathlib.Path("feed.out").read_bytes()}
+          if pathlib.Path("feed.extra").exists():
+              live_bodies["portable"] = pathlib.Path("feed.extra").read_bytes()
+          expected = {"latest": pathlib.Path("feed.out").read_bytes()}
+          if pathlib.Path("feed.extra").exists():
+              expected["portable"] = pathlib.Path("feed.extra").read_bytes()
+
+          paths = [p for p in pathlib.Path("feed.paths").read_text().split() if p]
+          live = [p for p in paths if "/history/" not in p]
+
+          def fetch(path):
+              url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
+              req = urllib.request.Request(url, headers={
+                  "Authorization": f"token {tok}", "Accept": "application/vnd.github+json"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return base64.b64decode(json.load(r)["content"])
+
+          for path in live:
+              body = fetch(path)
+              want = expected["portable"] if path.endswith("portable.yml") else expected["latest"]
+              if body != want:
+                  sys.exit(f"committed feed does not match what was generated: {path}")
+              print(f"committed ok: {path} sha256={hashlib.sha256(body).hexdigest()[:12]}")
+
+          for path in live:
+              url = f"https://raw.githubusercontent.com/{repo}/{branch}/{path}"
+              want = expected["portable"] if path.endswith("portable.yml") else expected["latest"]
+              for attempt in range(30):
+                  try:
+                      with urllib.request.urlopen(url, timeout=20) as r:
+                          if r.read() == want:
+                              print(f"CDN serving current bytes: {path} (attempt {attempt + 1})")
+                              break
+                  except Exception:
+                      pass
+                  time.sleep(10)
+              else:
+                  print(f"::warning::CDN still caching an older {path}; it converges on its own")
+          PYV
